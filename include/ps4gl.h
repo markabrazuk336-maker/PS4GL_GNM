@@ -59,11 +59,12 @@ void glDeleteSamplers( GLsizei count, const GLuint *samplers );
 void glSamplerParameteri( GLuint sampler, GLenum pname, GLint param );
 void glSamplerParameterf( GLuint sampler, GLenum pname, GLfloat param );
 void glSamplerParameterfv( GLuint sampler, GLenum pname, const GLfloat *param );
-
-// Accepted but do nothing (see "Limitations" in README.md):
 void glBindVertexArray( GLuint array );
 void glGenVertexArrays( GLsizei n, GLuint *arrays );
 void glDeleteVertexArrays( GLsizei n, const GLuint *arrays );
+GLboolean glIsVertexArray( GLuint array );
+
+// Accepted but do nothing (see "Limitations" in README.md):
 void glBeginQuery( GLenum target, GLuint id );
 void glEndQuery( GLenum target );
 void glGenQueries( GLsizei n, GLuint *ids );

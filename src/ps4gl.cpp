@@ -56,6 +56,10 @@ void ps4glLog( const char *fmt, ... )
 #define GL_MAX_3D_TEXTURE_SIZE_ 0x8073
 #define GL_MAX_ARRAY_TEXTURE_LAYERS_ 0x88FF
 
+// ---- glGetError: хранится первая ошибка, пока программа её не прочитает ----
+static GLenum s_glError = GL_NO_ERROR;
+static void GlError( GLenum e ) { if ( s_glError == GL_NO_ERROR ) s_glError = e; }
+
 static const int SCREEN_W = 1920, SCREEN_H = 1080;
 
 // =====================================================================
@@ -72,6 +76,7 @@ static uint8_t s_ctxValid[0x400];
 static uint32_t *s_dcb[2];								// буферы команд
 static const size_t DCB_BYTES = 4u << 20;
 static uint32_t *s_cmd;									// куда пишем команды текущего кадра
+static uint32_t *s_cmdStart;							// начало ещё не отправленной части кадра
 static int s_back;										// какой кадр сейчас рисуем
 static int s_frame;
 static bool s_clearedBackThisFrame;
@@ -110,6 +115,7 @@ static void *GpuAlloc( size_t bytes, size_t align )
 		if ( s_gpuUsed > s_gpuPeak ) s_gpuPeak = s_gpuUsed;
 		return (void *)p;
 	}
+	GlError( GL_OUT_OF_MEMORY );
 	ps4glLog( "ps4gl: out of video memory (asked %llu bytes, used %llu MiB)", (unsigned long long)bytes,
 	              (unsigned long long)( s_gpuUsed >> 20 ) );
 	return NULL;
@@ -168,7 +174,7 @@ static void BeginFrameCommands()
 		if ( s_pendingFree[i].frame < s_frameNo - 1 ) GpuFree( s_pendingFree[i].p, s_pendingFree[i].size );
 		else s_pendingFree[keep++] = s_pendingFree[i];
 	s_pendingFree.resize( keep );
-	s_cmd = s_dcb[s_back];
+	s_cmd = s_cmdStart = s_dcb[s_back];
 	s_cmd += sceGnmDrawInitDefaultHardwareState350( s_cmd, 256 );
 	DrawFrameReset();
 	memset( s_ctxValid, 0, sizeof( s_ctxValid ) );
@@ -281,8 +287,8 @@ void ps4glSwapBuffers( void )
 	for ( int k = 2; k < 64; k++ ) s_cmd[k] = 0;
 	s_cmd += 64;
 	__sync_synchronize();
-	void *addrs[1] = { s_dcb[s_back] };
-	uint32_t sizes[1] = { (uint32_t)( ( s_cmd - s_dcb[s_back] ) * 4 ) };
+	void *addrs[1] = { s_cmdStart };
+	uint32_t sizes[1] = { (uint32_t)( ( s_cmd - s_cmdStart ) * 4 ) };
 	int rs = sceGnmSubmitAndFlipCommandBuffers( 1, addrs, sizes, NULL, NULL, s_video, s_fbIdx, ORBIS_VIDEO_OUT_FLIP_VSYNC, s_frame );
 	sceGnmSubmitDone();
 	if ( rs != 0 )
@@ -340,6 +346,15 @@ static void BufferBeforeWrite( Buffer *b )
 		BufferRealloc( b, b->size, true );
 }
 static GLuint s_boundBuffer[8];
+static bool BufferTargetOk( GLenum target )
+{
+	switch ( target )
+	{
+	case GL_ARRAY_BUFFER: case GL_ELEMENT_ARRAY_BUFFER: case 0x88EB: case 0x88EC:
+	case 0x8F36: case 0x8F37: case 0x8A11: case 0x8C8E: return true;
+	}
+	return false;
+}
 static int BufferSlot( GLenum target )
 {
 	switch ( target )
@@ -545,9 +560,10 @@ static Program *CurProgram() { return s_programs.count( s_curProgram ) ? s_progr
 static void UniformWrite( GLint loc, const void *data, size_t bytes, bool scalarInt, GLint ival )
 {
 	Program *p = CurProgram();
-	if ( !p || loc < 0 ) return;
+	if ( !p ) { GlError( GL_INVALID_OPERATION ); return; }
+	if ( loc < 0 ) return;				// -1 по правилам GL молча пропускается
 	size_t i = (size_t)loc >> 10, idx = (size_t)loc & 1023;
-	if ( i >= p->uniforms.size() ) return;
+	if ( i >= p->uniforms.size() ) { GlError( GL_INVALID_OPERATION ); return; }
 	ProgUniform &u = p->uniforms[i];
 	if ( u.sampler >= 0 )
 	{
@@ -606,7 +622,55 @@ static bool CmdRoom( size_t dwords )
 	if ( (size_t)( s_cmd - s_dcb[s_back] ) + dwords + 1024 < DCB_BYTES / 4 ) return true;
 	static int s_said;
 	if ( s_said++ < 5 ) ps4glLog( "ps4gl: command buffer is full, draw skipped" );
+	GlError( GL_OUT_OF_MEMORY );
 	return false;
+}
+
+// Отправить всё нарисованное видеокарте и дождаться конца работы, не показывая кадр.
+// Обычно команды копятся до ps4glSwapBuffers, но процессору иногда нужен готовый результат.
+static volatile uint32_t *s_waitLabel;
+static uint32_t s_waitValue;
+static bool SubmitAndWait()
+{
+	if ( !s_waitLabel )
+	{
+		s_waitLabel = (volatile uint32_t *)GpuAlloc( 256, 256 );
+		if ( !s_waitLabel ) return false;
+		*s_waitLabel = 0;
+	}
+	const uint32_t value = ++s_waitValue;
+	FlushCaches();
+	uint64_t a = (uint64_t)(uintptr_t)s_waitLabel;
+	*s_cmd++ = Pkt3( 0x47, 5 );									// EVENT_WRITE_EOP: метка после всей работы
+	*s_cmd++ = 0x28u | ( 5u << 8 );								// BOTTOM_OF_PIPE_TS
+	*s_cmd++ = (uint32_t)a;
+	*s_cmd++ = (uint32_t)( a >> 32 & 0xFFFF ) | ( 1u << 29 );	// DATA_SEL = 32 бита
+	*s_cmd++ = value;
+	*s_cmd++ = 0;
+	__sync_synchronize();
+	void *addrs[1] = { s_cmdStart };
+	uint32_t sizes[1] = { (uint32_t)( ( s_cmd - s_cmdStart ) * 4 ) };
+	int rs = sceGnmSubmitCommandBuffers( 1, addrs, sizes, NULL, NULL );
+	if ( rs != 0 )
+	{
+		ps4glLog( "ps4gl: submit before reading failed: %x", rs );
+		return false;
+	}
+	// продолжение кадра — новая отправка: состояние видеокарты задаём заново, как в начале кадра
+	s_cmdStart = s_cmd;
+	s_cmd += sceGnmDrawInitDefaultHardwareState350( s_cmd, 256 );
+	memset( s_ctxValid, 0, sizeof( s_ctxValid ) );
+	s_fbChanged = true;
+	for ( int waited = 0; *s_waitLabel != value; waited++ )
+	{
+		if ( waited > 20000 )									// больше двух секунд: видеокарта зависла
+		{
+			ps4glLog( "ps4gl: GPU did not finish in time" );
+			return false;
+		}
+		sceKernelUsleep( 100 );
+	}
+	return true;
 }
 
 // ---- данные рисований на кадр (константы, таблицы V#, вершины переноса) ----
@@ -620,6 +684,7 @@ static void *Upload( const void *src, size_t bytes, size_t align = 256 )
 	{
 		static int s_said;
 		if ( s_said++ < 5 ) ps4glLog( "ps4gl: per-frame upload memory is full" );
+		GlError( GL_OUT_OF_MEMORY );
 		return NULL;
 	}
 	s_uploadOff = o + bytes;
@@ -1179,12 +1244,17 @@ static uint32_t PrimType( GLenum mode )
 
 static void DrawCommon( GLenum mode, GLsizei count, bool indexed, GLenum itype, const void *indices, GLint baseVertex, GLint first )
 {
-	if ( count <= 0 || s_video < 0 ) return;
+	if ( mode > GL_TRIANGLE_FAN ) { GlError( GL_INVALID_ENUM ); return; }
+	if ( indexed && itype != GL_UNSIGNED_BYTE && itype != GL_UNSIGNED_SHORT && itype != GL_UNSIGNED_INT ) { GlError( GL_INVALID_ENUM ); return; }
+	if ( count < 0 || first < 0 ) { GlError( GL_INVALID_VALUE ); return; }
+	if ( count == 0 || s_video < 0 ) return;
 	Program *p = CurProgram();
 	Shader *vs = p && p->linked && s_shaders.count( p->vs ) ? s_shaders[p->vs] : NULL;
 	Shader *ps = p && p->linked && s_shaders.count( p->ps ) ? s_shaders[p->ps] : NULL;
 	Target t;
-	if ( !vs || !ps || !GetTarget( s_drawFbo, t ) || !CmdRoom( 600 ) ) return;
+	if ( !vs || !ps ) { GlError( GL_INVALID_OPERATION ); return; }
+	if ( !GetTarget( s_drawFbo, t ) ) { GlError( GL_INVALID_FRAMEBUFFER_OPERATION ); return; }
+	if ( !CmdRoom( 600 ) ) return;
 	GLuint ibName = s_boundBuffer[1];
 	if ( indexed && itype == GL_UNSIGNED_BYTE )
 	{
@@ -1231,7 +1301,7 @@ static void DrawCommon( GLenum mode, GLsizei count, bool indexed, GLenum itype, 
 		indexSrc = ib && ib->data && off + (size_t)count * isz <= ib->size ? (const uint8_t *)ib->data + off : NULL;
 		if ( indexSrc ) ib->usedFrame = s_frameNo;
 	}
-	if ( indexed && !indexSrc ) return;
+	if ( indexed && !indexSrc ) { GlError( GL_INVALID_OPERATION ); return; }
 	if ( emu )
 	{
 		emuBytes = (uint32_t)count * isz;
@@ -1249,6 +1319,7 @@ static void DrawCommon( GLenum mode, GLsizei count, bool indexed, GLenum itype, 
 		{
 			static int s_said;
 			if ( s_said++ < 5 ) ps4glLog( "ps4gl: indexed draw without vertex attributes and with non-sequential indices is not supported" );
+			GlError( GL_INVALID_OPERATION );
 			return;
 		}
 		seqFirst = (int)v0 + baseVertex;
@@ -1342,10 +1413,11 @@ static void BlitTexture( const Texture *src, const Target &t, GLint sx0, GLint s
 static void DoBlit( GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, GLenum filter )
 {
 	auto it = s_fbos.find( s_readFbo );
-	if ( it == s_fbos.end() ) return;
+	if ( it == s_fbos.end() ) { GlError( GL_INVALID_FRAMEBUFFER_OPERATION ); return; }
 	Texture *src = it->second.colorRb ? ( s_rbs.count( it->second.color ) ? s_rbs[it->second.color] : NULL ) : TexOf( it->second.color );
 	Target t;
-	if ( !src || !src->mem || !GetTarget( s_drawFbo, t ) || !CmdRoom( 600 ) ) return;
+	if ( !src || !src->mem || !GetTarget( s_drawFbo, t ) ) { GlError( GL_INVALID_FRAMEBUFFER_OPERATION ); return; }
+	if ( !CmdRoom( 600 ) ) return;
 	BlitTexture( src, t, sx0, sy0, sx1, sy1, dx0 * t.scale, dy0 * t.scale, dx1 * t.scale, dy1 * t.scale, filter );
 	if ( s_drawFbo == 0 ) s_frameDrawsFb0++;
 }
@@ -1444,12 +1516,34 @@ static void DrawInit()
 }
 static void DrawFrameReset() { s_uploadOff = 0; }
 
+// ---- объекты массивов вершин (VAO). Рабочее состояние лежит в s_attr и s_boundBuffer[1],
+// а при смене объекта копируется: так рисованию не приходится каждый раз искать VAO ----
+struct Vao { Attrib attr[16]; GLuint elements = 0; bool used = false; };
+static std::map<GLuint, Vao> s_vaos;				// 0 — объект по умолчанию
+static GLuint s_curVao;
+static GLint s_packAlign = 4;						// glPixelStorei( GL_PACK_ALIGNMENT )
+
+static bool CapOk( GLenum cap )
+{
+	switch ( cap )
+	{
+	case GL_BLEND: case GL_CULL_FACE: case GL_DEPTH_TEST: case GL_DITHER: case GL_POLYGON_OFFSET_FILL:
+	case GL_SAMPLE_ALPHA_TO_COVERAGE: case GL_SAMPLE_COVERAGE: case GL_SCISSOR_TEST: case GL_STENCIL_TEST:
+	case 0x8D69: case 0x8C89: return true;			// PRIMITIVE_RESTART_FIXED_INDEX, RASTERIZER_DISCARD
+	}
+	return false;
+}
+
 // =====================================================================
 // Функции GL
 // =====================================================================
 extern "C" {
 
-void glActiveTexture( GLenum u ) { s_activeUnit = ( u - GL_TEXTURE0 ) & 31; }
+void glActiveTexture( GLenum u )
+{
+	if ( u < GL_TEXTURE0 || u >= GL_TEXTURE0 + 32 ) { GlError( GL_INVALID_ENUM ); return; }
+	s_activeUnit = u - GL_TEXTURE0;
+}
 void glAttachShader( GLuint prog, GLuint sh )
 {
 		if ( !s_programs.count( prog ) || !s_shaders.count( sh ) ) return;
@@ -1460,9 +1554,14 @@ void glBindAttribLocation( GLuint prog, GLuint index, const GLchar *name )
 {
 		if ( s_programs.count( prog ) && name ) s_programs[prog]->attribLoc[name] = index;
 }
-void glBindBuffer( GLenum target, GLuint b ) { s_boundBuffer[BufferSlot( target )] = b; }
+void glBindBuffer( GLenum target, GLuint b )
+{
+	if ( !BufferTargetOk( target ) ) { GlError( GL_INVALID_ENUM ); return; }
+	s_boundBuffer[BufferSlot( target )] = b;
+}
 void glBindFramebuffer( GLenum target, GLuint fb )
 {
+	if ( target != GL_FRAMEBUFFER && target != 0x8CA9 && target != 0x8CA8 ) { GlError( GL_INVALID_ENUM ); return; }
 		if ( ( target == GL_FRAMEBUFFER || target == 0x8CA9 ) && s_drawFbo != fb ) s_fbChanged = true;
 	if ( target == GL_FRAMEBUFFER || target == 0x8CA9 ) s_drawFbo = fb;		// DRAW
 	if ( target == GL_FRAMEBUFFER || target == 0x8CA8 ) s_readFbo = fb;		// READ
@@ -1476,7 +1575,18 @@ void glBindTexture( GLenum target, GLuint tex )
 	if ( tex ) s_unitNot2D[s_activeUnit & 31] = false;
 	if ( tex && !s_textures.count( tex ) ) s_textures[tex] = new Texture();
 }
-void glBindVertexArray( GLuint ) { }
+void glBindVertexArray( GLuint id )
+{
+	if ( id && !s_vaos.count( id ) ) { GlError( GL_INVALID_OPERATION ); return; }
+	Vao &cur = s_vaos[id];
+	cur.used = true;
+	if ( id == s_curVao ) return;
+	Vao &old = s_vaos[s_curVao];
+	for ( int i = 0; i < 16; i++ ) { old.attr[i] = s_attr[i]; s_attr[i] = cur.attr[i]; }
+	old.elements = s_boundBuffer[1];
+	s_boundBuffer[1] = cur.elements;
+	s_curVao = id;
+}
 void glBlendColor( GLfloat r, GLfloat g, GLfloat b, GLfloat a ) { s_blendColor[0] = r; s_blendColor[1] = g; s_blendColor[2] = b; s_blendColor[3] = a; }
 void glBlendEquation( GLenum e ) { s_blendEq = s_blendEqA = e; }
 void glBlendFunc( GLenum src, GLenum dst ) { s_blendSrc = s_blendSrcA = src; s_blendDst = s_blendDstA = dst; }
@@ -1488,16 +1598,21 @@ void glBlitFramebuffer( GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, G
 }
 void glBufferData( GLenum target, GLsizeiptr size, const void *data, GLenum )
 {
-		Buffer *b = FindBuffer( s_boundBuffer[BufferSlot( target )] );
-	if ( !b ) return;
+		if ( !BufferTargetOk( target ) ) { GlError( GL_INVALID_ENUM ); return; }
+	if ( size < 0 ) { GlError( GL_INVALID_VALUE ); return; }
+	Buffer *b = FindBuffer( s_boundBuffer[BufferSlot( target )] );
+	if ( !b ) { GlError( GL_INVALID_OPERATION ); return; }
 	// всегда новая память: так делает и настоящий драйвер («осиротить» старую)
 	BufferRealloc( b, (size_t)size, false );
 	if ( data && b->data ) memcpy( b->data, data, size );
 }
 void glBufferSubData( GLenum target, GLintptr off, GLsizeiptr size, const void *data )
 {
+	if ( !BufferTargetOk( target ) ) { GlError( GL_INVALID_ENUM ); return; }
 	Buffer *b = FindBuffer( s_boundBuffer[BufferSlot( target )] );
-	if ( !b || !b->data || !data || (size_t)( off + size ) > b->size ) return;
+	if ( !b || !b->data ) { GlError( GL_INVALID_OPERATION ); return; }
+	if ( off < 0 || size < 0 || (size_t)( off + size ) > b->size ) { GlError( GL_INVALID_VALUE ); return; }
+	if ( !data ) return;
 	BufferBeforeWrite( b );
 	if ( b->data ) memcpy( (char *)b->data + off, data, size );
 }
@@ -1646,6 +1761,10 @@ void glDeleteBuffers( GLsizei n, const GLuint *ids )
 	{
 		Buffer *b = FindBuffer( ids[i] );
 		if ( b && b->data ) { GpuFreeLater( b->data, b->size ); b->data = NULL; b->size = 0; }
+		if ( !ids[i] ) continue;
+		// удалённый буфер отвязывается от текущих привязок и от текущего VAO
+		for ( GLuint &bound : s_boundBuffer ) if ( bound == ids[i] ) bound = 0;
+		for ( Attrib &a : s_attr ) if ( a.buffer == ids[i] ) a.buffer = 0;
 	}
 }
 void glDeleteFramebuffers( GLsizei n, const GLuint *ids ) { for ( GLsizei i = 0; i < n; i++ ) s_fbos.erase( ids[i] ); }
@@ -1692,13 +1811,22 @@ void glDeleteTextures( GLsizei n, const GLuint *ids )
 		for ( int u = 0; u < 32; u++ ) if ( s_bound2D[u] == ids[i] ) s_bound2D[u] = 0;
 	}
 }
-void glDeleteVertexArrays( GLsizei, const GLuint * ) {}
+void glDeleteVertexArrays( GLsizei n, const GLuint *ids )
+{
+	if ( n < 0 ) { GlError( GL_INVALID_VALUE ); return; }
+	for ( GLsizei i = 0; i < n; i++ )
+	{
+		if ( !ids[i] ) continue;						// объект по умолчанию не удаляется
+		if ( ids[i] == s_curVao ) glBindVertexArray( 0 );
+		s_vaos.erase( ids[i] );
+	}
+}
 void glDepthFunc( GLenum f ) { s_depthFunc = f; }
 void glDepthMask( GLboolean m ) { s_depthMask = m; }
 void glDepthRangef( GLfloat n, GLfloat f ) { s_depthNear = n; s_depthFar = f; }
 void glDetachShader( GLuint, GLuint ) {}		// связь нужна программе и после glLinkProgram
-void glDisable( GLenum cap ) { s_enabled[CapSlot( cap )] = GL_FALSE; }
-void glDisableVertexAttribArray( GLuint i ) { if ( i < 16 ) s_attr[i].enabled = false; }
+void glDisable( GLenum cap ) { if ( !CapOk( cap ) ) GlError( GL_INVALID_ENUM ); s_enabled[CapSlot( cap )] = GL_FALSE; }
+void glDisableVertexAttribArray( GLuint i ) { if ( i < 16 ) s_attr[i].enabled = false; else GlError( GL_INVALID_VALUE ); }
 void glDrawArrays( GLenum mode, GLint first, GLsizei count )
 {
 		DrawCommon( mode, count, false, 0, NULL, 0, first );
@@ -1710,8 +1838,8 @@ void glDrawRangeElements( GLenum mode, GLuint, GLuint, GLsizei count, GLenum typ
 		DrawCommon( mode, count, true, type, idx, 0, 0 );
 	if ( s_drawFbo == 0 ) s_frameDrawsFb0++;
 }
-void glEnable( GLenum cap ) { s_enabled[CapSlot( cap )] = GL_TRUE; }
-void glEnableVertexAttribArray( GLuint i ) { if ( i < 16 ) s_attr[i].enabled = true; }
+void glEnable( GLenum cap ) { if ( !CapOk( cap ) ) GlError( GL_INVALID_ENUM ); s_enabled[CapSlot( cap )] = GL_TRUE; }
+void glEnableVertexAttribArray( GLuint i ) { if ( i < 16 ) s_attr[i].enabled = true; else GlError( GL_INVALID_VALUE ); }
 void glEndQuery( GLenum ) {}
 GLsync glFenceSync( GLenum, GLbitfield ) { return (GLsync)(uintptr_t)1; }
 void glFinish( void ) {}
@@ -1734,11 +1862,16 @@ void glFramebufferTexture2D( GLenum target, GLenum att, GLenum, GLuint tex, GLin
 	else if ( att == GL_DEPTH_ATTACHMENT || att == 0x821A ) { f.depth = tex; f.depthRb = false; }
 }
 void glFrontFace( GLenum m ) { s_frontFace = m; }
-static void GenNames( GLsizei n, GLuint *ids ) { for ( GLsizei i = 0; i < n; i++ ) ids[i] = NewName(); }
+static void GenNames( GLsizei n, GLuint *ids )
+{
+	if ( n < 0 ) { GlError( GL_INVALID_VALUE ); return; }
+	for ( GLsizei i = 0; i < n; i++ ) ids[i] = NewName();
+}
 static GLuint s_nextBuffer = 1;	// свой счётчик: номер буфера = место в s_buffers
 void glGenBuffers( GLsizei n, GLuint *ids )
 {
-		for ( GLsizei i = 0; i < n; i++ )
+		if ( n < 0 ) { GlError( GL_INVALID_VALUE ); return; }
+	for ( GLsizei i = 0; i < n; i++ )
 	{
 		if ( s_nextBuffer >= 65536 ) { ps4glLog( "ps4gl: more than 65535 buffers" ); ids[i] = 0; continue; }
 		ids[i] = s_nextBuffer++;
@@ -1749,10 +1882,14 @@ void glGenQueries( GLsizei n, GLuint *ids ) { GenNames( n, ids ); }
 void glGenRenderbuffers( GLsizei n, GLuint *ids ) { GenNames( n, ids ); }
 void glGenSamplers( GLsizei n, GLuint *ids ) { GenNames( n, ids ); }
 void glGenTextures( GLsizei n, GLuint *ids ) { GenNames( n, ids ); }
-void glGenVertexArrays( GLsizei n, GLuint *ids ) { GenNames( n, ids ); }
+void glGenVertexArrays( GLsizei n, GLuint *ids )
+{
+	GenNames( n, ids );
+	for ( GLsizei i = 0; i < n; i++ ) s_vaos[ids[i]];
+}
 void glGetIntegerv( GLenum pname, GLint *v );
 void glGetBooleanv( GLenum pname, GLboolean *v ) { GLint i = 0; glGetIntegerv( pname, &i ); if ( v ) *v = i ? GL_TRUE : GL_FALSE; }
-GLenum glGetError( void ) { return GL_NO_ERROR; }
+GLenum glGetError( void ) { GLenum e = s_glError; s_glError = GL_NO_ERROR; return e; }
 void glGetFloatv( GLenum pname, GLfloat *v ) { GLint i = 0; glGetIntegerv( pname, &i ); if ( v ) *v = (GLfloat)i; }
 void glGetFramebufferAttachmentParameteriv( GLenum, GLenum, GLenum, GLint *v ) { if ( v ) *v = 0; }
 void glGetIntegerv( GLenum pname, GLint *v )
@@ -1776,6 +1913,13 @@ void glGetIntegerv( GLenum pname, GLint *v )
 	case GL_FRAMEBUFFER_BINDING_: *v = (GLint)s_drawFbo; return;
 	case GL_VIEWPORT: memcpy( v, s_viewport, sizeof( s_viewport ) ); return;
 	case GL_NUM_EXTENSIONS_: *v = 0; return;
+	case 0x85B5: *v = (GLint)s_curVao; return;				// VERTEX_ARRAY_BINDING
+	case GL_ARRAY_BUFFER_BINDING: *v = (GLint)s_boundBuffer[0]; return;
+	case GL_ELEMENT_ARRAY_BUFFER_BINDING: *v = (GLint)s_boundBuffer[1]; return;
+	case GL_PACK_ALIGNMENT: *v = s_packAlign; return;
+	case GL_UNPACK_ALIGNMENT: *v = (GLint)s_unpackAlign; return;
+	case GL_IMPLEMENTATION_COLOR_READ_FORMAT: *v = GL_RGBA; return;
+	case GL_IMPLEMENTATION_COLOR_READ_TYPE: *v = GL_UNSIGNED_BYTE; return;
 	default: *v = 0; return;
 	}
 }
@@ -1811,7 +1955,8 @@ const GLubyte *glGetString( GLenum name )
 		       "GL_OES_texture_float_linear GL_OES_texture_half_float_linear GL_OES_vertex_half_float GL_OES_element_index_uint "
 		       "GL_EXT_texture_compression_dxt1 GL_EXT_texture_compression_dxt3 GL_EXT_texture_compression_dxt5 "
 		       "GL_EXT_texture_compression_s3tc GL_EXT_texture_storage GL_OES_standard_derivatives GL_EXT_shader_texture_lod "
-		       "GL_OES_texture_stencil8 GL_EXT_color_buffer_float GL_EXT_draw_instanced GL_EXT_instanced_arrays ";
+		       "GL_OES_texture_stencil8 GL_EXT_color_buffer_float GL_EXT_draw_instanced GL_EXT_instanced_arrays "
+		       "GL_OES_vertex_array_object ";
 	default: return (const GLubyte *)"";
 	}
 }
@@ -1831,9 +1976,14 @@ GLint glGetUniformLocation( GLuint prog, const GLchar *name )
 }
 GLboolean glIsEnabled( GLenum cap ) { return s_enabled[CapSlot( cap )]; }
 GLboolean glIsTexture( GLuint t ) { return t ? GL_TRUE : GL_FALSE; }
+GLboolean glIsVertexArray( GLuint id )
+{
+	auto it = s_vaos.find( id );
+	return id && it != s_vaos.end() && it->second.used ? GL_TRUE : GL_FALSE;	// имя становится объектом при первой привязке
+}
 void glLinkProgram( GLuint id )
 {
-		if ( !s_programs.count( id ) ) return;
+		if ( !s_programs.count( id ) ) { GlError( GL_INVALID_VALUE ); return; }
 	Program *p = s_programs[id];
 	if ( !LinkProgram( id, p ) )
 	{
@@ -1853,16 +2003,78 @@ void *glMapBufferRange( GLenum target, GLintptr off, GLsizeiptr len, GLbitfield 
 	}
 	if ( !b || !b->data || (size_t)( off + len ) > b->size )
 	{
+		GlError( GL_INVALID_VALUE );
 		static int s_bad;
 		if ( s_bad++ < 5 ) ps4glLog( "ps4gl: glMapBufferRange out of range (%u, %lld+%lld)", s_boundBuffer[BufferSlot( target )], (long long)off, (long long)len );
 		return NULL;
 	}
 	return (char *)b->data + off;
 }
-void glPixelStorei( GLenum p, GLint v ) { if ( p == GL_UNPACK_ALIGNMENT && v > 0 ) s_unpackAlign = v; }
+void glPixelStorei( GLenum p, GLint v )
+{
+	if ( p != GL_UNPACK_ALIGNMENT && p != GL_PACK_ALIGNMENT ) return;
+	if ( v != 1 && v != 2 && v != 4 && v != 8 ) { GlError( GL_INVALID_VALUE ); return; }
+	if ( p == GL_PACK_ALIGNMENT ) s_packAlign = v; else s_unpackAlign = v;
+}
 void glPolygonOffset( GLfloat factor, GLfloat units ) { s_polyFactor = factor; s_polyUnits = units; }
 void glReadBuffer( GLenum ) {}
-void glReadPixels( GLint, GLint, GLsizei w, GLsizei h, GLenum, GLenum, void *px ) { if ( px && w > 0 && h > 0 ) memset( px, 0, (size_t)w * h * 4 ); }
+// Читает цель glBindFramebuffer( GL_READ_FRAMEBUFFER ). Кадр копится до показа, поэтому сначала
+// отправляем нарисованное и ждём видеокарту: вызов медленный, для скриншотов и проверок.
+void glReadPixels( GLint x, GLint y, GLsizei w, GLsizei h, GLenum fmt, GLenum type, void *px )
+{
+	if ( w < 0 || h < 0 ) { GlError( GL_INVALID_VALUE ); return; }
+	if ( ( fmt != GL_RGBA && fmt != GL_RGB && fmt != 0x80E1 ) || type != GL_UNSIGNED_BYTE ) { GlError( GL_INVALID_ENUM ); return; }
+	Target t;
+	if ( !GetTarget( s_readFbo, t ) ) { GlError( GL_INVALID_FRAMEBUFFER_OPERATION ); return; }
+	if ( t.cbFormat != 0xA || t.cbNumber != 0 ) { GlError( GL_INVALID_OPERATION ); return; }	// только 8 бит на канал
+	const int comps = fmt == GL_RGB ? 3 : 4;
+	const size_t row = ( (size_t)w * comps + s_packAlign - 1 ) / s_packAlign * s_packAlign;
+	uint8_t *out = (uint8_t *)px;
+	if ( s_boundBuffer[2] )							// PIXEL_PACK_BUFFER: px — смещение в буфере
+	{
+		Buffer *b = FindBuffer( s_boundBuffer[2] );
+		const size_t off = (uintptr_t)px, need = w && h ? row * ( h - 1 ) + (size_t)w * comps : 0;
+		if ( !b || !b->data || off + need > b->size ) { GlError( GL_INVALID_OPERATION ); return; }
+		BufferBeforeWrite( b );
+		out = (uint8_t *)b->data + off;
+	}
+	if ( !out ) return;
+	// пиксели за краем цели не трогаем
+	const int s = t.scale, appW = t.w / s, appH = t.h / s;
+	const int x0 = x > 0 ? x : 0, y0 = y > 0 ? y : 0;
+	const int x1 = (int64_t)x + w < appW ? x + w : appW, y1 = (int64_t)y + h < appH ? y + h : appH;
+	if ( x0 >= x1 || y0 >= y1 ) return;
+	if ( !CmdRoom( 1024 ) ) return;
+	if ( !SubmitAndWait() ) { GlError( GL_OUT_OF_MEMORY ); return; }
+	const int n = x1 - x0;
+	const size_t srcRow = (size_t)n * s * 4;
+	std::vector<uint8_t> line( srcRow * s );		// видеопамять читается медленно: сначала копия строк
+	for ( int yy = y0; yy < y1; yy++ )
+	{
+		// у GL строка 0 внизу; в кадре экрана строка 0 памяти — верх
+		const int memY = t.flipY ? appH - 1 - yy : yy;
+		for ( int r = 0; r < s; r++ )
+			memcpy( &line[srcRow * r], (const uint8_t *)t.color + ( ( (size_t)memY * s + r ) * t.pitch + (size_t)x0 * s ) * 4, srcRow );
+		uint8_t *d = out + (size_t)( yy - y ) * row + (size_t)( x0 - x ) * comps;
+		for ( int xx = 0; xx < n; xx++, d += comps )
+		{
+			// при суперсэмплинге — среднее, как на экране
+			uint32_t sum[4] = {};
+			for ( int r = 0; r < s; r++ )
+				for ( int k = 0; k < s; k++ )
+				{
+					const uint8_t *p = &line[srcRow * r + ( (size_t)xx * s + k ) * 4];
+					for ( int j = 0; j < 4; j++ ) sum[j] += p[j];
+				}
+			const uint32_t div = (uint32_t)( s * s );
+			for ( int j = 0; j < 4; j++ ) sum[j] = ( sum[j] + div / 2 ) / div;
+			const uint8_t cr = (uint8_t)sum[t.swap ? 2 : 0], cg = (uint8_t)sum[1], cb = (uint8_t)sum[t.swap ? 0 : 2];
+			const uint8_t ca = s_readFbo ? (uint8_t)sum[3] : 255;		// у экрана нет альфы
+			d[0] = fmt == 0x80E1 ? cb : cr; d[1] = cg; d[2] = fmt == 0x80E1 ? cr : cb;
+			if ( comps == 4 ) d[3] = ca;
+		}
+	}
+}
 void glRenderbufferStorageMultisample( GLenum, GLsizei, GLenum ifmt, GLsizei w, GLsizei h )
 {
 		if ( !s_boundRb ) return;
@@ -1880,16 +2092,21 @@ void glSamplerParameteri( GLuint smp, GLenum p, GLint v )
 	if ( p == GL_TEXTURE_WRAP_S ) o.wrapS = v; else if ( p == GL_TEXTURE_WRAP_T ) o.wrapT = v;
 	else if ( p == GL_TEXTURE_MIN_FILTER ) o.minF = v; else if ( p == GL_TEXTURE_MAG_FILTER ) o.magF = v;
 }
-void glScissor( GLint x, GLint y, GLsizei w, GLsizei h ) { s_scissor[0] = x; s_scissor[1] = y; s_scissor[2] = w; s_scissor[3] = h; }
+void glScissor( GLint x, GLint y, GLsizei w, GLsizei h )
+{
+	if ( w < 0 || h < 0 ) { GlError( GL_INVALID_VALUE ); return; }
+	s_scissor[0] = x; s_scissor[1] = y; s_scissor[2] = w; s_scissor[3] = h;
+}
 void glShaderBinary( GLsizei n, const GLuint *ids, GLenum, const void *bin, GLsizei len )
 {
 		for ( GLsizei i = 0; i < n; i++ )
 	{
-		if ( !s_shaders.count( ids[i] ) ) continue;
+		if ( !s_shaders.count( ids[i] ) ) { GlError( GL_INVALID_VALUE ); continue; }
 		Shader *sh = s_shaders[ids[i]];
 		sh->valid = ParseSb( sh, (const uint8_t *)bin, (size_t)len );
 		if ( !sh->valid )
 		{
+			GlError( GL_INVALID_VALUE );
 			static int s_said;
 			if ( s_said++ < 10 ) ps4glLog( "ps4gl: shader %u: bad binary (%d bytes)", ids[i], (int)len );
 		}
@@ -1903,7 +2120,9 @@ void glStencilOp( GLenum, GLenum, GLenum ) {}
 void glStencilOpSeparate( GLenum, GLenum, GLenum, GLenum ) {}
 void glTexImage2D( GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint, GLenum fmt, GLenum type, const void *px )
 {
-		Texture *t = BoundTex( target );
+		if ( target != GL_TEXTURE_2D ) { GlError( GL_INVALID_ENUM ); return; }		// кубические текстуры пока не поддержаны
+	if ( level < 0 || w < 0 || h < 0 || w > 8192 || h > 8192 ) { GlError( GL_INVALID_VALUE ); return; }
+	Texture *t = BoundTex( target );
 	if ( t && level > 0 )
 	{
 		if ( t->mem && level < t->levels && w == t->mipW[level] && h == t->mipH[level] && ( px || s_boundBuffer[3] ) )
@@ -1938,15 +2157,24 @@ void glUniform1f( GLint loc, GLfloat v ) { UniformWrite( loc, &v, 4, false, 0 );
 void glUniform1i( GLint loc, GLint v ) { UniformWrite( loc, &v, 4, true, v ); }
 void glUniform4fv( GLint loc, GLsizei count, const GLfloat *v ) { if ( v && count > 0 ) UniformWrite( loc, v, (size_t)count * 16, false, 0 ); }
 GLboolean glUnmapBuffer( GLenum ) { return GL_TRUE; }
-void glUseProgram( GLuint id ) { s_curProgram = id; }
+void glUseProgram( GLuint id )
+{
+	if ( id && !s_programs.count( id ) ) { GlError( GL_INVALID_VALUE ); return; }
+	if ( id && !s_programs[id]->linked ) { GlError( GL_INVALID_OPERATION ); return; }
+	s_curProgram = id;
+}
 void glVertexAttribPointer( GLuint i, GLint size, GLenum type, GLboolean norm, GLsizei stride, const void *ptr )
 {
-		if ( i >= 16 ) return;
+		if ( i >= 16 || stride < 0 || ( ( size < 1 || size > 4 ) && size != 0x80E1 ) ) { GlError( GL_INVALID_VALUE ); return; }
 	Attrib &a = s_attr[i];
 	a.size = size; a.type = type; a.norm = norm; a.stride = stride;
 	a.buffer = s_boundBuffer[0]; a.offset = (uintptr_t)ptr;
 }
-void glViewport( GLint x, GLint y, GLsizei w, GLsizei h ) { s_viewport[0] = x; s_viewport[1] = y; s_viewport[2] = w; s_viewport[3] = h; }
+void glViewport( GLint x, GLint y, GLsizei w, GLsizei h )
+{
+	if ( w < 0 || h < 0 ) { GlError( GL_INVALID_VALUE ); return; }
+	s_viewport[0] = x; s_viewport[1] = y; s_viewport[2] = w; s_viewport[3] = h;
+}
 void glWaitSync( GLsync, GLbitfield, GLuint64 ) {}
 void glDrawRangeElementsBaseVertex( GLenum mode, GLuint, GLuint, GLsizei count, GLenum type, const void *idx, GLint base )
 {
@@ -2056,6 +2284,11 @@ static const GlEntry s_glTable[] =
 
 void *ps4glGetProcAddress( const char *name )
 {
+	// те же VAO под именами расширения GL_OES_vertex_array_object
+	if ( !strcmp( name, "glBindVertexArrayOES" ) ) return (void *)&glBindVertexArray;
+	if ( !strcmp( name, "glGenVertexArraysOES" ) ) return (void *)&glGenVertexArrays;
+	if ( !strcmp( name, "glDeleteVertexArraysOES" ) ) return (void *)&glDeleteVertexArrays;
+	if ( !strcmp( name, "glIsVertexArrayOES" ) || !strcmp( name, "glIsVertexArray" ) ) return (void *)&glIsVertexArray;
 	for ( const GlEntry *e = s_glTable; e->name; e++ )
 		if ( !strcmp( e->name, name ) )
 			return e->fn;

@@ -47,6 +47,8 @@ python3 build.py
 
 The package appears at `build/cube/IV0000-PSGL00001_00-PS4GLCUBE0000000.pkg`. Copy it to the console and install it with GoldHEN's Package Installer.
 
+`python build.py selftest` builds a self-test for the console. The screen turns green when all checks pass and red when one fails, and the details go to `/data/ps4gl/log.txt`.
+
 ## Using the driver
 
 Add `src/ps4gl.cpp` to your project (and optionally `src/ps4gl_heap.c`), put `include/` and `src/` on the include path, and link `-lSceVideoOut -lSceGnmDriver -lSceSystemService`.
@@ -94,6 +96,9 @@ The driver writes its log to `/data/ps4gl/log.txt`. `ps4glSetLogCallback` sends 
 | Presentation | Triple buffering, 60 FPS vsync |
 | Supersampling | `ps4glSetSupersampling( 2 )` renders at 3840x2160 and averages down to 1080p, which removes jagged edges. Confirmed on a PS4 Pro |
 | PS4 Pro | `ps4glIsProMode()` reports whether the console is running in Pro mode |
+| Vertex array objects | `glGenVertexArrays`, `glBindVertexArray`, `glDeleteVertexArrays`, `glIsVertexArray`, also under the `GL_OES_vertex_array_object` names |
+| Reading pixels | `glReadPixels` from the screen and from 8-bit framebuffer objects as RGBA, RGB or BGRA, also into a pixel buffer. It waits for the GPU, so use it for screenshots and tests, not every frame in a game |
+| Errors | `glGetError` reports invalid arguments, invalid use and running out of memory |
 
 ## GNM problems and how the driver handles them
 
@@ -120,8 +125,8 @@ These cost the most time to find, so they are written down here for anyone else 
 - No cube maps, 3D textures or texture arrays.
 - No stencil, MSAA, instancing or multiple colour attachments.
 - Mipmaps need RGBA8 textures with power-of-two sides, at least 64 pixels wide.
-- Vertex array objects, queries and sync objects are accepted but do nothing.
-- `glReadPixels` returns zeros, and `glGetError` always reports no error.
+- Queries and sync objects are accepted but do nothing.
+- `glReadPixels` cannot read 16-bit or float render targets.
 - An indexed draw with no vertex attributes needs sequential indices.
 
 ## Project layout

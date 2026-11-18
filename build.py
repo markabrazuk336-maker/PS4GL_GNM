@@ -1,6 +1,7 @@
 """build.py — build the sample into an installable .pkg.
 
     python build.py            # build/cube/IV0000-PSGL00001_00-PS4GLCUBE0000000.pkg
+    python build.py selftest   # build/selftest/IV0000-PSGL00002_00-PS4GLTEST0000000.pkg
     python build.py --no-pkg   # stop after the ELF (no .NET needed)
 
 Needs: Python 3.8+, LLVM on PATH (clang, clang++, ld.lld, llc, opt, llvm-link, llvm-objcopy,
@@ -13,10 +14,18 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-OUT = os.path.join(ROOT, "build", "cube")
-SAMPLE = os.path.join(ROOT, "samples", "cube")
+SAMPLES = {     # title, title id, label, shaders (all from samples/cube/shaders)
+    "cube": ("PS4GL Cube", "PSGL00001", "PS4GLCUBE", ("color.vert", "color.frag", "cube.vert", "cube.frag")),
+    "selftest": ("PS4GL Selftest", "PSGL00002", "PS4GLTEST", ("color.vert", "color.frag")),
+}
+NAME = next((a for a in sys.argv[1:] if not a.startswith("-")), "cube")
+if NAME not in SAMPLES:
+    raise SystemExit("unknown sample %s, choose from: %s" % (NAME, ", ".join(SAMPLES)))
+TITLE, TITLE_ID, LABEL, SHADERS = SAMPLES[NAME]
+OUT = os.path.join(ROOT, "build", NAME)
+SAMPLE = os.path.join(ROOT, "samples", NAME)
+SHADER_DIR = os.path.join(ROOT, "samples", "cube", "shaders")
 LIBS = ["-lc", "-lkernel", "-lc++", "-lSceSysmodule", "-lSceSystemService", "-lSceVideoOut", "-lSceGnmDriver"]
-SHADERS = ("color.vert", "color.frag", "cube.vert", "cube.frag")
 
 
 def tool(name):
@@ -40,7 +49,7 @@ def compile_shaders(gen):
     for fn in SHADERS:
         sb = os.path.join(OUT, "shaders", fn + ".sb")
         os.makedirs(os.path.dirname(sb), exist_ok=True)
-        run([sys.executable, os.path.join(ROOT, "tools", "shadersbC.py"), os.path.join(SAMPLE, "shaders", fn), "-o", sb])
+        run([sys.executable, os.path.join(ROOT, "tools", "shadersbC.py"), os.path.join(SHADER_DIR, fn), "-o", sb])
         with open(sb, "rb") as f:
             data = f.read()
         lines.append("static const unsigned char g_%s[] = { %s };" % (fn.replace(".", "_"), ",".join(str(b) for b in data)))
@@ -74,7 +83,7 @@ def main():
         objs.append(o)
 
     print("3. link")
-    elf = os.path.join(OUT, "cube.elf")
+    elf = os.path.join(OUT, NAME + ".elf")
     run([tool("ld.lld"), "-m", "elf_x86_64", "-pie", "--script", os.path.join(tc, "link.x"), "--eh-frame-hdr",
          "-o", elf, "-L" + os.path.join(tc, "lib")] + objs + LIBS + [os.path.join(tc, "lib", "crt1.o")])
     print("  %s (%d KiB)" % (elf, os.path.getsize(elf) // 1024))
@@ -82,8 +91,8 @@ def main():
         return 0
 
     print("4. package")
-    r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "mkpkg.py"), elf, "--title", "PS4GL Cube",
-                        "--title-id", "PSGL00001", "--label", "PS4GLCUBE", "-o", OUT])
+    r = subprocess.run([sys.executable, os.path.join(ROOT, "tools", "mkpkg.py"), elf, "--title", TITLE,
+                        "--title-id", TITLE_ID, "--label", LABEL, "-o", OUT])
     return r.returncode
 
 
