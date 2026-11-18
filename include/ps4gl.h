@@ -25,6 +25,16 @@ int ps4glInit( size_t videoPoolBytes );
 // Submits everything drawn since the previous call and queues the frame for display.
 void ps4glSwapBuffers( void );
 
+// 1 when the console is a PS4 Pro running in its faster Pro mode.
+int ps4glIsProMode( void );
+
+// Supersampling for the default framebuffer: scale 2 renders at 3840x2160 and averages the
+// picture down to the 1920x1080 output, which removes jagged edges. Scale 1 turns it off.
+// Your code keeps using 1920x1080 coordinates. The change applies from the next frame.
+// It draws four times as many pixels and uses about 64 MiB more video memory.
+void ps4glSetSupersampling( int scale );
+int ps4glGetSupersampling( void );			// the scale used by the current frame
+
 // Address of a GL function by name, or NULL (the same idea as eglGetProcAddress).
 void *ps4glGetProcAddress( const char *name );
 

@@ -153,6 +153,22 @@ int main()
 	GLuint cubeIb = MakeBuffer( GL_ELEMENT_ARRAY_BUFFER, s_cubeIndices, sizeof( s_cubeIndices ) );
 	GLuint tex = MakeTexture();
 
+	// a small square in the corner: green while supersampling is on, red while it is off
+	const float x0 = -0.95f, x1 = -0.89f, y0 = 0.84f, y1 = 0.95f;
+	const float markOn[] =
+	{
+		x0, y0, 0, 0.1f, 0.9f, 0.2f,  x1, y0, 0, 0.1f, 0.9f, 0.2f,  x1, y1, 0, 0.1f, 0.9f, 0.2f,
+		x0, y0, 0, 0.1f, 0.9f, 0.2f,  x1, y1, 0, 0.1f, 0.9f, 0.2f,  x0, y1, 0, 0.1f, 0.9f, 0.2f,
+	};
+	const float markOff[] =
+	{
+		x0, y0, 0, 0.9f, 0.1f, 0.1f,  x1, y0, 0, 0.9f, 0.1f, 0.1f,  x1, y1, 0, 0.9f, 0.1f, 0.1f,
+		x0, y0, 0, 0.9f, 0.1f, 0.1f,  x1, y1, 0, 0.9f, 0.1f, 0.1f,  x0, y1, 0, 0.9f, 0.1f, 0.1f,
+	};
+	GLuint markOnVb = MakeBuffer( GL_ARRAY_BUFFER, markOn, sizeof( markOn ) );
+	GLuint markOffVb = MakeBuffer( GL_ARRAY_BUFFER, markOff, sizeof( markOff ) );
+	const bool pro = ps4glIsProMode() != 0;
+
 	glViewport( 0, 0, 1920, 1080 );
 	glClearColor( 0.05f, 0.07f, 0.13f, 1.0f );
 	glEnable( GL_DEPTH_TEST );
@@ -162,6 +178,10 @@ int main()
 	for ( int frame = 0;; frame++ )
 	{
 		float t = frame / 60.0f;
+
+		// on a PS4 Pro: 5 seconds with supersampling, 5 without, to compare the edges
+		ps4glSetSupersampling( pro && ( frame / 300 ) % 2 == 0 ? 2 : 1 );
+
 		glClear( GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT );
 
 		// the cube, on the right
@@ -193,6 +213,13 @@ int main()
 		glVertexAttribPointer( colorPos, 3, GL_FLOAT, GL_FALSE, 24, (const void *)0 );
 		glVertexAttribPointer( colorCol, 3, GL_FLOAT, GL_FALSE, 24, (const void *)12 );
 		glDrawArrays( GL_TRIANGLES, 0, 3 );
+
+		// the supersampling mark, in the same vertex format as the triangle
+		glUniform4f( uOffset, 0.0f, 0.0f, 0.0f, 0.0f );
+		glBindBuffer( GL_ARRAY_BUFFER, ps4glGetSupersampling() > 1 ? markOnVb : markOffVb );
+		glVertexAttribPointer( colorPos, 3, GL_FLOAT, GL_FALSE, 24, (const void *)0 );
+		glVertexAttribPointer( colorCol, 3, GL_FLOAT, GL_FALSE, 24, (const void *)12 );
+		glDrawArrays( GL_TRIANGLES, 0, 6 );
 
 		ps4glSwapBuffers();
 	}

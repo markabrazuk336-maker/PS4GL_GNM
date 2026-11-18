@@ -177,6 +177,40 @@ static void BeginFrameCommands()
 
 static void *s_screenDepth;								// буфер глубины экрана (FBO 0), Z32F
 
+// Суперсэмплинг: FBO 0 рисуется в буфер 3840x2160, а при показе сжимается до 1080p.
+// Ровно вдвое по каждой стороне: линейный фильтр в центре пикселя экрана попадает точно
+// между четырьмя пикселями буфера и даёт их среднее. Программа по-прежнему видит 1920x1080.
+static int s_ssScale = 1, s_ssWanted = 1;				// сейчас и со следующего кадра
+static void *s_ssColor, *s_ssDepth;
+static void ResolveSupersampling();
+
+void ps4glSetSupersampling( int scale ) { s_ssWanted = scale == 2 ? 2 : 1; }
+int ps4glGetSupersampling( void ) { return s_ssScale; }
+int ps4glIsProMode( void ) { return sceKernelIsNeoMode() ? 1 : 0; }
+
+// меняем только между кадрами: внутри кадра все рисования идут в одну цель
+static void ApplySupersampling()
+{
+	if ( s_ssWanted == s_ssScale )
+		return;
+	if ( s_ssWanted > 1 && !s_ssColor )
+	{
+		const size_t bytes = (size_t)SCREEN_W * s_ssWanted * SCREEN_H * s_ssWanted * 4;
+		void *color = GpuAlloc( bytes, 0x10000 ), *depth = color ? GpuAlloc( bytes, 0x10000 ) : NULL;
+		if ( !depth )
+		{
+			GpuFree( color, bytes );
+			s_ssWanted = 1;
+			ps4glLog( "ps4gl: not enough video memory for supersampling" );
+			return;
+		}
+		s_ssColor = color;
+		s_ssDepth = depth;
+	}
+	s_ssScale = s_ssWanted;
+	ps4glLog( "ps4gl: rendering at %dx%d", SCREEN_W * s_ssScale, SCREEN_H * s_ssScale );
+}
+
 int ps4glInit( size_t videoPoolBytes )
 {
 	if ( s_video >= 0 )
@@ -221,8 +255,10 @@ int ps4glInit( size_t videoPoolBytes )
 	int rr = sceVideoOutRegisterBuffers( s_video, 0, (void **)s_fb, 3, &attr );
 	sceVideoOutSetFlipRate( s_video, 0 );
 	ps4glLog( "ps4gl: started, video pool %llu MiB, display buffers registered: %d", (unsigned long long)( poolBytes >> 20 ), rr );
+	ps4glLog( "ps4gl: PS4 Pro mode: %s", ps4glIsProMode() ? "on" : "off" );
 	s_back = 0; s_fbIdx = 0; s_flipsPending = 0;
 	DrawInit();
+	ApplySupersampling();
 	BeginFrameCommands();
 	return 1;
 }
@@ -235,6 +271,8 @@ void ps4glSwapBuffers( void )
 	// в этот кадр ничего не рисовали: иначе на экран попал бы один из старых кадров
 	if ( !s_clearedBackThisFrame && !s_frameDrawsFb0 )
 		DmaFill( s_fb[s_fbIdx], s_lastClearBGRA, (size_t)SCREEN_W * SCREEN_H * 4 );
+	else if ( s_ssScale > 1 )
+		ResolveSupersampling();
 	s_frameDrawsFb0 = 0;
 	// заготовка для показа: последние 64 слова — NOP с меткой PrepareFlip,
 	// без неё sceGnmSubmitAndFlipCommandBuffers возвращает ошибку
@@ -268,6 +306,7 @@ void ps4glSwapBuffers( void )
 	s_frameNo = s_frame;
 	s_back ^= 1;
 	s_fbIdx = ( s_fbIdx + 1 ) % 3;
+	ApplySupersampling();
 	BeginFrameCommands();
 }
 
@@ -860,15 +899,19 @@ struct Target
 	void *color = NULL; int pitch = 0, w = 0, h = 0, rows = 0; uint32_t cbFormat = 0xA, cbNumber = 0, swap = 0;
 	bool flipY = false;				// кадр на экран: строка 0 — сверху (у GL — снизу)
 	void *depth = NULL; int dpitch = 0, drows = 0;
+	int scale = 1;					// во сколько раз цель больше координат программы (суперсэмплинг FBO 0)
 };
 
 static bool GetTarget( GLuint fboId, Target &t )
 {
 	if ( fboId == 0 )
 	{
-		t.color = s_fb[s_fbIdx]; t.pitch = SCREEN_W; t.w = SCREEN_W; t.h = SCREEN_H; t.rows = SCREEN_H;
-		t.cbFormat = 0xA; t.cbNumber = 0; t.swap = 1; t.flipY = true;
-		t.depth = s_screenDepth; t.dpitch = SCREEN_W; t.drows = SCREEN_H;
+		const bool ss = s_ssScale > 1;
+		t.scale = s_ssScale;
+		t.color = ss ? s_ssColor : s_fb[s_fbIdx];
+		t.pitch = t.w = SCREEN_W * t.scale; t.h = t.rows = SCREEN_H * t.scale;
+		t.cbFormat = 0xA; t.cbNumber = 0; t.swap = ss ? 0 : 1; t.flipY = true;	// большой буфер — RGBA, как текстура
+		t.depth = ss ? s_ssDepth : s_screenDepth; t.dpitch = t.pitch; t.drows = t.rows;
 		return true;
 	}
 	auto it = s_fbos.find( fboId );
@@ -955,8 +998,8 @@ static void EmitTargetState( const Target &t, bool useGlState )
 	Ctx( 0xA200, depthOn ? ( ( 1u << 1 ) | ( s_depthMask ? ( 1u << 2 ) : 0 ) | ( CompareFunc( s_depthFunc ) << 4 ) ) : 0 );
 	Ctx( 0xA000, 0 );
 	// окно: GL — снизу вверх. В целях рендера строка 0 = низ (как у GL текстур), на экране — верх
-	int vx = useGlState ? s_viewport[0] : 0, vy = useGlState ? s_viewport[1] : 0;
-	int vw = useGlState ? s_viewport[2] : t.w, vh = useGlState ? s_viewport[3] : t.h;
+	int vx = useGlState ? s_viewport[0] * t.scale : 0, vy = useGlState ? s_viewport[1] * t.scale : 0;
+	int vw = useGlState ? s_viewport[2] * t.scale : t.w, vh = useGlState ? s_viewport[3] * t.scale : t.h;
 	float ys = vh / 2.0f, yo = vy + vh / 2.0f;
 	if ( t.flipY ) { ys = -ys; yo = t.h - yo; }
 	const uint32_t vp[6] = { F2U( vw / 2.0f ), F2U( vx + vw / 2.0f ), F2U( ys ), F2U( yo ),
@@ -998,7 +1041,8 @@ static void EmitTargetState( const Target &t, bool useGlState )
 	uint32_t gsc[2] = { 0x80000000u, br };
 	if ( useGlState && s_enabled[CapSlot( GL_SCISSOR_TEST )] )
 	{
-		int x0 = s_scissor[0], y0 = s_scissor[1], x1 = s_scissor[0] + s_scissor[2], y1 = s_scissor[1] + s_scissor[3];
+		int x0 = s_scissor[0] * t.scale, y0 = s_scissor[1] * t.scale;
+		int x1 = ( s_scissor[0] + s_scissor[2] ) * t.scale, y1 = ( s_scissor[1] + s_scissor[3] ) * t.scale;
 		if ( t.flipY ) { int a0 = t.h - y1, a1 = t.h - y0; y0 = a0; y1 = a1; }
 		if ( x0 < 0 ) x0 = 0; if ( y0 < 0 ) y0 = 0; if ( x1 > t.w ) x1 = t.w; if ( y1 > t.h ) y1 = t.h;
 		if ( x1 < x0 ) x1 = x0; if ( y1 < y0 ) y1 = y0;
@@ -1260,13 +1304,8 @@ static void DrawCommon( GLenum mode, GLsizei count, bool indexed, GLenum itype, 
 
 // ---- перенос (glBlitFramebuffer): прямоугольник с текстурой ----
 static void *s_blitVs, *s_blitPs, *s_clearPs;
-static void DoBlit( GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, GLenum filter )
+static void BlitTexture( const Texture *src, const Target &t, GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, GLenum filter )
 {
-	auto it = s_fbos.find( s_readFbo );
-	if ( it == s_fbos.end() ) return;
-	Texture *src = it->second.colorRb ? ( s_rbs.count( it->second.color ) ? s_rbs[it->second.color] : NULL ) : TexOf( it->second.color );
-	Target t;
-	if ( !src || !src->mem || !GetTarget( s_drawFbo, t ) || !CmdRoom( 600 ) ) return;
 	FlushCaches();						// источник только что был целью рендера
 	EmitTargetState( t, false );
 	// вершины: позиция (в координатах цели -> NDC) и u, v источника
@@ -1298,7 +1337,34 @@ static void DoBlit( GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint
 	*s_cmd++ = Pkt3( 0x2F, 1 ); *s_cmd++ = 1;
 	*s_cmd++ = Pkt3( 0x2D, 2 ); *s_cmd++ = 6; *s_cmd++ = 2;
 	FlushCaches();
+}
+
+static void DoBlit( GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, GLenum filter )
+{
+	auto it = s_fbos.find( s_readFbo );
+	if ( it == s_fbos.end() ) return;
+	Texture *src = it->second.colorRb ? ( s_rbs.count( it->second.color ) ? s_rbs[it->second.color] : NULL ) : TexOf( it->second.color );
+	Target t;
+	if ( !src || !src->mem || !GetTarget( s_drawFbo, t ) || !CmdRoom( 600 ) ) return;
+	BlitTexture( src, t, sx0, sy0, sx1, sy1, dx0 * t.scale, dy0 * t.scale, dx1 * t.scale, dy1 * t.scale, filter );
 	if ( s_drawFbo == 0 ) s_frameDrawsFb0++;
+}
+
+// Сжать большой буфер в настоящий кадр экрана. Строка 0 буфера — верх картинки.
+// Место в буфере команд не проверяем: рисования всегда оставляют запас в 1024 слова.
+static void ResolveSupersampling()
+{
+	Texture src;
+	src.w = src.pitch = SCREEN_W * s_ssScale;
+	src.h = src.rows = SCREEN_H * s_ssScale;
+	src.sel = SEL_RGBA;
+	src.mem = s_ssColor;
+	Target t;
+	t.color = s_fb[s_fbIdx];
+	t.pitch = t.w = SCREEN_W; t.h = t.rows = SCREEN_H;
+	t.swap = 1; t.flipY = true;
+	memset( s_ctxValid, 0, sizeof( s_ctxValid ) );		// цель сменила размер (как при очистке)
+	BlitTexture( &src, t, 0, 0, src.w, src.h, 0, SCREEN_H, SCREEN_W, 0, GL_LINEAR );
 }
 
 // Очистка цели. Быстрый путь — прямоугольник на всю цель самой видеокартой
