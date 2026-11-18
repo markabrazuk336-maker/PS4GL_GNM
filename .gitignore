@@ -1,0 +1,8 @@
+build/
+__pycache__/
+*.pyc
+*.work/
+*.sb
+*.elf
+*.oelf
+*.pkg
