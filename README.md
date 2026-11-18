@@ -92,6 +92,8 @@ The driver writes its log to `/data/ps4gl/log.txt`. `ps4glSetLogCallback` sends 
 | Render targets | Framebuffer objects with colour and depth, `glBlitFramebuffer` |
 | Other state | Scissor, culling, colour mask, sampler objects |
 | Presentation | Triple buffering, 60 FPS vsync |
+| Supersampling | `ps4glSetSupersampling( 2 )` renders at 3840x2160 and averages down to 1080p, which removes jagged edges. Confirmed on a PS4 Pro |
+| PS4 Pro | `ps4glIsProMode()` reports whether the console is running in Pro mode |
 
 ## GNM problems and how the driver handles them
 
@@ -112,7 +114,7 @@ These cost the most time to find, so they are written down here for anyone else 
 
 ## Limitations
 
-- The screen is always 1920x1080.
+- The video output is always 1920x1080, even when supersampling renders at 3840x2160.
 - Shaders must be compiled on the PC. `glShaderSource` and `glCompileShader` do nothing.
 - The shader compiler translates a practical subset of GLSL. `gl_FragCoord`, `gl_FragDepth` and shaders that need scratch memory are not supported.
 - No cube maps, 3D textures or texture arrays.
