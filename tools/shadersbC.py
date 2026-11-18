@@ -1,6 +1,6 @@
-"""sbmake.py — GLSL -> готовый шейдер PS4 (.sb) для glShaderBinary.
+"""shadersbC.py — GLSL -> готовый шейдер PS4 (.sb) для glShaderBinary.
 
-    python tools/sbmake.py <шейдер.vert|.frag> -o <выход.sb>
+    python tools/shadersbC.py <шейдер.vert|.frag> -o <выход.sb>
 
 Цепочка (без компилятора Sony):
   1. tools/glsl2cl.py: GLSL -> OpenCL C, тело lmv_main(u, in, o, r);

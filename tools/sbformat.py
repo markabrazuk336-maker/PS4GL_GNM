@@ -198,7 +198,7 @@ def pack_blob(d):
 # ------------------------------------------------------------------ проверка
 
 def check(path):
-    data = open(path, "rb").read() + b"\0\0\0\0"     # sbmake пишет блок на 4 байта короче поля длины
+    data = open(path, "rb").read() + b"\0\0\0\0"     # shadersbC пишет блок на 4 байта короче поля длины
     ok = bad = 0
     for mt in re.finditer(struct.pack("<I", BLOB_MAGIC), data):
         o = mt.start()

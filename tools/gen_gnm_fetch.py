@@ -3,7 +3,7 @@
     python tools/gen_gnm_fetch.py
 
 Writes src/gen/ps4gl_fetch.h: GCN machine code for 1..16 vertex attributes.
-Convention (the same as shaders from tools/sbmake.py): V# table in s[2:3], 16 bytes per
+Convention (the same as shaders from tools/shadersbC.py): V# table in s[2:3], 16 bytes per
 attribute, attribute k -> v[4+4k : 7+4k], return through s[0:1]. Every V# is loaded into
 the same s[12:15], so the fetch shader never touches SGPRs above s15.
 """

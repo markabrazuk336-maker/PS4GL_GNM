@@ -2,7 +2,7 @@
 //
 // Функции glXxx складывают состояние, а при рисовании пишут команды видеокарте (PM4)
 // в буфер кадра. Кадр целиком отправляется в ps4glSwapBuffers. Шейдеры заранее собраны
-// на ПК (tools/sbmake.py) и приходят через glShaderBinary.
+// на ПК (tools/shadersbC.py) и приходят через glShaderBinary.
 //
 // Лицензия: MIT (см. LICENSE).
 #include <stdio.h>
@@ -326,7 +326,7 @@ static GLboolean s_enabled[64];
 static int CapSlot( GLenum cap ) { return (int)( cap & 63 ); }
 
 // =====================================================================
-// Шейдеры и программы: .sb из tools/sbmake.py (разбор как в tools/sbformat.py)
+// Шейдеры и программы: .sb из tools/shadersbC.py (разбор как в tools/sbformat.py)
 // =====================================================================
 struct UniformElem { std::string name; int off; int size; int count; };
 struct SamplerDecl { std::string name; int index; };

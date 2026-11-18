@@ -40,7 +40,7 @@ def compile_shaders(gen):
     for fn in SHADERS:
         sb = os.path.join(OUT, "shaders", fn + ".sb")
         os.makedirs(os.path.dirname(sb), exist_ok=True)
-        run([sys.executable, os.path.join(ROOT, "tools", "sbmake.py"), os.path.join(SAMPLE, "shaders", fn), "-o", sb])
+        run([sys.executable, os.path.join(ROOT, "tools", "shadersbC.py"), os.path.join(SAMPLE, "shaders", fn), "-o", sb])
         with open(sb, "rb") as f:
             data = f.read()
         lines.append("static const unsigned char g_%s[] = { %s };" % (fn.replace(".", "_"), ",".join(str(b) for b in data)))

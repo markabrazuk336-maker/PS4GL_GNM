@@ -57,7 +57,7 @@ int main()
     ps4glInit( 0 );                               // 1920x1080, 1 GiB of video memory
 
     GLuint vs = glCreateShader( GL_VERTEX_SHADER );
-    glShaderBinary( 1, &vs, 0, vsData, vsSize );  // compiled on the PC by tools/sbmake.py
+    glShaderBinary( 1, &vs, 0, vsData, vsSize );  // compiled on the PC by tools/shadersbC.py
     // ... the usual OpenGL ES 2 setup ...
 
     for ( ;; )
@@ -72,7 +72,7 @@ int main()
 Compile shaders ahead of time:
 
 ```bash
-python tools/sbmake.py shader.vert -o shader.vert.sb
+python tools/shadersbC.py shader.vert -o shader.vert.sb
 ```
 
 The driver writes its log to `/data/ps4gl/log.txt`. `ps4glSetLogCallback` sends it elsewhere.
@@ -128,7 +128,7 @@ src/ps4gl.cpp          the driver
 src/ps4gl_heap.c       optional malloc on direct memory (generated)
 src/gen/               generated fetch shaders and tables
 shaders/               GLSL support library and the driver's own shaders
-tools/sbmake.py        GLSL -> PS4 shader binary
+tools/shadersbC.py        GLSL -> PS4 shader binary
 tools/glsl2cl.py       GLSL -> OpenCL C (first compiler stage)
 tools/sbformat.py      shader binary format: read and write
 tools/sbdump.py        inspect shader binaries

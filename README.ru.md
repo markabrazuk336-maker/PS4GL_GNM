@@ -57,7 +57,7 @@ int main()
     ps4glInit( 0 );                               // 1920x1080, 1 ГБ видеопамяти
 
     GLuint vs = glCreateShader( GL_VERTEX_SHADER );
-    glShaderBinary( 1, &vs, 0, vsData, vsSize );  // собран на ПК через tools/sbmake.py
+    glShaderBinary( 1, &vs, 0, vsData, vsSize );  // собран на ПК через tools/shadersbC.py
     // ... обычная настройка OpenGL ES 2 ...
 
     for ( ;; )
@@ -72,7 +72,7 @@ int main()
 Шейдеры собираются заранее:
 
 ```bash
-python tools/sbmake.py shader.vert -o shader.vert.sb
+python tools/shadersbC.py shader.vert -o shader.vert.sb
 ```
 
 Журнал драйвера лежит в `/data/ps4gl/log.txt`. Функция `ps4glSetLogCallback` направляет его в другое место.
@@ -128,7 +128,7 @@ src/ps4gl.cpp          драйвер
 src/ps4gl_heap.c       malloc на прямой памяти, по желанию (сгенерирован)
 src/gen/               сгенерированные загрузчики вершин и таблицы
 shaders/               библиотека функций GLSL и шейдеры самого драйвера
-tools/sbmake.py        GLSL -> готовый шейдер PS4
+tools/shadersbC.py        GLSL -> готовый шейдер PS4
 tools/glsl2cl.py       GLSL -> OpenCL C (первый этап компилятора)
 tools/sbformat.py      формат готовых шейдеров: чтение и запись
 tools/sbdump.py        просмотр готовых шейдеров

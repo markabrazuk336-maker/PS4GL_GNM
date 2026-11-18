@@ -14,7 +14,7 @@ GLSL очень похож на OpenCL C, а clang умеет OpenCL C -> LLVM �
 Встроенные функции GLSL — shaders/lmvlib.h.
 Получается функция
     void lmv_main(const LMV_U *u, const LMV_IN *in, LMV_OUT *o)
-которую потом вызывает «рамка» (входы -> структуры -> выходы), см. tools/sbmake.py.
+которую потом вызывает «рамка» (входы -> структуры -> выходы), см. tools/shadersbC.py.
 """
 import os
 import re

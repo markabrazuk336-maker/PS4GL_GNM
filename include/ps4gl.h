@@ -5,7 +5,7 @@
 //     ... ordinary glXxx calls ...
 //     ps4glSwapBuffers();                   // shows the frame
 //
-// Shaders are compiled ahead of time on the PC by tools/sbmake.py and loaded with
+// Shaders are compiled ahead of time on the PC by tools/shadersbC.py and loaded with
 // glShaderBinary( 1, &shader, 0, data, size ): the PS4 has no GLSL compiler at run time.
 #pragma once
 

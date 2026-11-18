@@ -46,7 +46,7 @@ LMV_OL float4 normalize(float4 a) { return a * rsqrt(dot(a, a)); }
 LMV_OL float3 cross(float3 a, float3 b) { return (float3)(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x); }
 LMV_OL float3 reflect(float3 i, float3 n) { return i - 2.0f * dot(n, i) * n; }
 
-// Чтение текстур реализует «рамка» шейдера (tools/sbmake.py). LMV_RES — описания
+// Чтение текстур реализует «рамка» шейдера (tools/shadersbC.py). LMV_RES — описания
 // текстур (T#, 8 слов) и сэмплеров (S#, 4 слова), до 16 штук: рамка заполняет их
 // из SGPR и расширенной таблицы.
 typedef struct { uint8 t[16]; uint4 s[16]; } LMV_RES;
