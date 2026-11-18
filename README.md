@@ -10,8 +10,10 @@ Why not Piglet, the system OpenGL library? Piglet only starts in system-category
 
 ## Status
 
+![The cube sample running on a PS4 Pro at 60 FPS](docs/cube.jpg)
+
 - The driver has rendered complex 3D scenes at 60 FPS on a PS4 Pro with GoldHEN.
-- The cube sample in this repository builds into a `.pkg`, and its GPU commands have been checked on a PC test stand. **It has not been run on a console yet.**
+- The cube sample in this repository has been run on a PS4 Pro with GoldHEN at 60 FPS (screenshot above). It has not been tested on a base PS4 yet.
 - This is a young project with a limited feature set. See [Limitations](#limitations).
 
 ## Requirements
